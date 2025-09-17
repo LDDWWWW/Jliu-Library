@@ -1,44 +1,30 @@
 <template>
-  <div>
-    <h1>Books with ISBN > 1000</h1>
-    <ul>
-      <li v-for="book in books" :key="book.id">
-        {{ book.name }} - ISBN: {{ book.isbn }}
-      </li>
-    </ul>
-  </div>
+    <div>
+        <h1>Books with ISBN > 1000</h1>
+        <ul>
+            <li v-for="book in books" :key="book.id">
+                {{ book.name }} - ISBN: {{ book.isbn }}
+            </li>
+        </ul>
+    </div>
 </template>
 
-<script>
+<script setup>
 import { ref, onMounted } from 'vue';
-import db from '../firebase/init.js';
 import { collection, query, where, getDocs } from 'firebase/firestore';
+import db from '../firebase/init.js';
 
-export default {
-  name: 'BookList',
-  setup() {
-    const books = ref([]);
+const books = ref([]);
 
-    const fetchBooks = async () => {
-      try {
-        const q = query(
-          collection(db, 'books'),
-          where('isbn', '>', 1000)   // 🔑 筛选 ISBN > 1000
-        );
-
-        const querySnapshot = await getDocs(q);
-        books.value = querySnapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data()
-        }));
-      } catch (error) {
-        console.error('Error fetching books: ', error);
-      }
-    };
-
-    onMounted(fetchBooks);
-
-    return { books };
-  }
+const fetchBooks = async () => {
+    const q = query(collection(db, 'books'), where('isbn', '>', 1000));
+    const querySnapshot = await getDocs(q);
+    books.value = querySnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+    }));
 };
+
+// 在页面挂在的时候使用 
+onMounted(fetchBooks);
 </script>
