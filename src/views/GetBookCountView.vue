@@ -20,7 +20,7 @@ const error = ref(null)
 // 定义异步函数
 const getBookCount = async () => {
     try {
-        const response = await axios.get('https://YOUR_ENDPOINT_HERE.cloudfunctions.net/countBooks')
+        const response = await axios.get('https://us-central1-week7-junchen.cloudfunctions.net/countBooks')
         count.value = response.data.count
         error.value = null
     } catch (err) {
