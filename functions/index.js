@@ -31,6 +31,12 @@ setGlobalOptions({ maxInstances: 10 });
 //   response.send("Hello from Firebase!");
 // });
 
+
+const admin = require("firebase-admin");
+const cors = require("cors")({ origin: true });
+
+admin.initializeApp();
+
 exports.countBooks = onRequest((req, res) => {
   cors(req, res, async () => {
     try {
