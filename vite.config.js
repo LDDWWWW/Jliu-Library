@@ -15,7 +15,5 @@ export default defineConfig({
       '@': fileURLToPath(new URL('./src', import.meta.url))
     }
   },
-    publicPath: process.env.NODE_ENV === 'production'
-    ? '/Jliu-Library/'
-    : '/'
+  base: '/Jliu-Library/'
 })
