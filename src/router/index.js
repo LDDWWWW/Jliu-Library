@@ -8,6 +8,7 @@ import GetBookCountView from '@/views/GetBookCountView.vue'
 import WeatherView from '@/views/WeatherView.vue'
 import CountBookAPI from '@/views/CountBookAPI.vue'
 
+//123
 const routes = [
   {
     path: '/',
