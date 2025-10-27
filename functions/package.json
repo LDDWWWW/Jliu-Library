@@ -1,26 +1,400 @@
-{
-  "name": "functions",
-  "description": "Cloud Functions for Firebase",
-  "scripts": {
-    "lint": "eslint .",
-    "serve": "firebase emulators:start --only functions",
-    "shell": "firebase functions:shell",
-    "start": "npm run shell",
-    "deploy": "firebase deploy --only functions",
-    "logs": "firebase functions:log"
-  },
-  "engines": {
-    "node": "22"
-  },
-  "main": "index.js",
-  "dependencies": {
-    "firebase-admin": "^12.6.0",
-    "firebase-functions": "^6.0.1"
-  },
-  "devDependencies": {
-    "eslint": "^8.15.0",
-    "eslint-config-google": "^0.14.0",
-    "firebase-functions-test": "^3.1.0"
-  },
-  "private": true
+/**
+ * Firebase Functions for Men's Health Connect Australia
+ * Handles email sending via Resend API
+ */
+
+const { setGlobalOptions } = require('firebase-functions')
+const { onRequest } = require('firebase-functions/https')
+const { onSchedule } = require('firebase-functions/scheduler')
+const logger = require('firebase-functions/logger')
+const admin = require('firebase-admin')
+const { Resend } = require('resend')
+
+// Initialize Firebase Admin
+admin.initializeApp()
+
+// Initialize Resend with API key
+const resend = new Resend('re_aWeEP3mU_C4KFcHJpnqffzujQJdEvjFMF')
+
+// For cost control, you can set the maximum number of containers that can be
+// running at the same time. This helps mitigate the impact of unexpected
+// traffic spikes by instead downgrading performance.
+setGlobalOptions({ maxInstances: 10 })
+
+// CORS helper function
+const cors = (req, res, callback) => {
+  const allowedOrigins = [
+    'http://localhost:5173',
+    'http://localhost:4173',
+    'https://menconnect-australia.web.app',
+    'https://menconnect-australia.firebaseapp.com',
+  ]
+
+  const origin = req.headers.origin
+  if (allowedOrigins.includes(origin)) {
+    res.set('Access-Control-Allow-Origin', origin)
+  }
+
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('')
+    return
+  }
+
+  callback()
 }
+
+// Health check endpoint
+exports.health = onRequest((req, res) => {
+  cors(req, res, () => {
+    res.json({
+      status: 'ok',
+      message: 'Firebase Functions server is running',
+      timestamp: new Date().toISOString(),
+    })
+  })
+})
+
+// Email sending endpoint
+exports.sendEmail = onRequest((req, res) => {
+  cors(req, res, async () => {
+    try {
+      const { to, subject, html, text, attachments } = req.body
+
+      // Validate required fields
+      if (!to || !subject || !html) {
+        return res.status(400).json({
+          success: false,
+          error: 'Missing required fields: to, subject, html',
+        })
+      }
+
+      // Prepare email data
+      const emailData = {
+        from: "Men's Health Connect Australia <onboarding@resend.dev>",
+        to,
+        subject,
+        html,
+        text: text || '',
+      }
+
+      // Add attachments if provided
+      if (attachments && attachments.length > 0) {
+        emailData.attachments = attachments
+      }
+
+      // Send email using Resend
+      const { data, error } = await resend.emails.send(emailData)
+
+      if (error) {
+        logger.error('Resend API error:', error)
+        return res.status(500).json({
+          success: false,
+          error: error.message || 'Failed to send email',
+        })
+      }
+
+      logger.info('Email sent successfully:', data)
+
+      res.json({
+        success: true,
+        messageId: data.id,
+        message: 'Email sent successfully',
+      })
+    } catch (error) {
+      logger.error('Server error:', error)
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Internal server error',
+      })
+    }
+  })
+})
+
+// Bulk email sending endpoint
+exports.bulkEmail = onRequest((req, res) => {
+  cors(req, res, async () => {
+    try {
+      const { recipients, subject, content, scheduleEmail, scheduleTime } = req.body
+
+      // Validate required fields
+      if (!recipients || !Array.isArray(recipients) || recipients.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'Recipients array is required and must not be empty',
+        })
+      }
+
+      if (!subject || !content) {
+        return res.status(400).json({
+          success: false,
+          error: 'Subject and content are required',
+        })
+      }
+
+      // If scheduling is requested, store in Firestore
+      if (scheduleEmail && scheduleTime) {
+        const scheduledTime = new Date(scheduleTime)
+        const now = new Date()
+
+        if (scheduledTime <= now) {
+          return res.status(400).json({
+            success: false,
+            error: 'Scheduled time must be in the future',
+          })
+        }
+
+        // Store scheduled email in Firestore
+        const scheduledEmailData = {
+          recipients,
+          subject,
+          content,
+          scheduledTime: scheduledTime.toISOString(),
+          status: 'scheduled',
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        }
+
+        const docRef = await admin.firestore().collection('scheduledEmails').add(scheduledEmailData)
+
+        logger.info('Email scheduled for:', scheduledTime.toISOString())
+
+        return res.json({
+          success: true,
+          message: 'Email scheduled successfully',
+          emailId: docRef.id,
+          scheduledTime: scheduledTime.toISOString(),
+          recipientCount: recipients.length,
+        })
+      }
+
+      // Send emails immediately
+      let sentCount = 0
+      let failedCount = 0
+      const results = []
+
+      // Process emails in batches to avoid rate limiting
+      const batchSize = 10
+      for (let i = 0; i < recipients.length; i += batchSize) {
+        const batch = recipients.slice(i, i + batchSize)
+
+        const batchPromises = batch.map(async (recipient) => {
+          try {
+            // Personalize content
+            const personalizedContent = content.replace(/\{\{name\}\}/g, recipient.name || 'User')
+
+            const emailData = {
+              from: "Men's Health Connect Australia <onboarding@resend.dev>",
+              to: recipient.email,
+              subject,
+              html: personalizedContent,
+              text: personalizedContent.replace(/<[^>]*>/g, ''), // Strip HTML for text version
+            }
+
+            const { data, error } = await resend.emails.send(emailData)
+
+            if (error) {
+              throw new Error(error.message)
+            }
+
+            sentCount++
+
+            return {
+              email: recipient.email,
+              success: true,
+              emailId: data.id,
+            }
+          } catch (error) {
+            failedCount++
+            logger.error(`Failed to send email to ${recipient.email}:`, error)
+
+            return {
+              email: recipient.email,
+              success: false,
+              error: error.message,
+            }
+          }
+        })
+
+        const batchResults = await Promise.all(batchPromises)
+        results.push(...batchResults)
+
+        // Add delay between batches to respect rate limits
+        if (i + batchSize < recipients.length) {
+          await new Promise((resolve) => setTimeout(resolve, 1000))
+        }
+      }
+
+      // Store email history in Firestore
+      await admin
+        .firestore()
+        .collection('emailHistory')
+        .add({
+          subject,
+          recipientCount: recipients.length,
+          sentCount,
+          failedCount,
+          status: 'completed',
+          sentAt: admin.firestore.FieldValue.serverTimestamp(),
+          results: results.slice(0, 10), // Store first 10 results
+        })
+
+      logger.info(`Bulk email completed: ${sentCount} sent, ${failedCount} failed`)
+
+      res.json({
+        success: true,
+        message: `Bulk email completed: ${sentCount} sent, ${failedCount} failed`,
+        sentCount,
+        failedCount,
+        totalRecipients: recipients.length,
+        results: results.slice(0, 10), // Return first 10 results for preview
+      })
+    } catch (error) {
+      logger.error('Bulk email error:', error)
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Internal server error',
+      })
+    }
+  })
+})
+
+// Get bulk email history endpoint
+exports.emailHistory = onRequest((req, res) => {
+  cors(req, res, async () => {
+    try {
+      const snapshot = await admin
+        .firestore()
+        .collection('emailHistory')
+        .orderBy('sentAt', 'desc')
+        .limit(50)
+        .get()
+
+      const emails = snapshot.docs.map((doc) => ({
+        id: doc.id,
+        ...doc.data(),
+        sentAt: doc.data().sentAt?.toDate?.()?.toISOString() || new Date().toISOString(),
+      }))
+
+      res.json({
+        success: true,
+        emails,
+      })
+    } catch (error) {
+      logger.error('Get bulk email history error:', error)
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Internal server error',
+      })
+    }
+  })
+})
+
+// Cancel scheduled email endpoint
+exports.cancelEmail = onRequest((req, res) => {
+  cors(req, res, async () => {
+    try {
+      const { emailId } = req.body
+
+      if (!emailId) {
+        return res.status(400).json({
+          success: false,
+          error: 'Email ID is required',
+        })
+      }
+
+      // Update the scheduled email status in Firestore
+      await admin.firestore().collection('scheduledEmails').doc(emailId).update({
+        status: 'cancelled',
+        cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
+      })
+
+      logger.info(`Cancelled scheduled email: ${emailId}`)
+
+      res.json({
+        success: true,
+        message: 'Scheduled email cancelled successfully',
+        emailId,
+      })
+    } catch (error) {
+      logger.error('Cancel scheduled email error:', error)
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Internal server error',
+      })
+    }
+  })
+})
+
+// Scheduled function to process scheduled emails
+exports.processScheduledEmails = onSchedule('every 5 minutes', async () => {
+  logger.info('Checking for scheduled emails...')
+
+  const now = new Date()
+  const scheduledEmails = await admin
+    .firestore()
+    .collection('scheduledEmails')
+    .where('status', '==', 'scheduled')
+    .where('scheduledTime', '<=', now.toISOString())
+    .get()
+
+  for (const doc of scheduledEmails.docs) {
+    const emailData = doc.data()
+
+    try {
+      // Update status to processing
+      await doc.ref.update({ status: 'processing' })
+
+      // Send the emails (reuse the bulk email logic)
+      const { recipients, subject, content } = emailData
+
+      let sentCount = 0
+      let failedCount = 0
+
+      for (const recipient of recipients) {
+        try {
+          const personalizedContent = content.replace(/\{\{name\}\}/g, recipient.name || 'User')
+
+          const emailData = {
+            from: "Men's Health Connect Australia <onboarding@resend.dev>",
+            to: recipient.email,
+            subject,
+            html: personalizedContent,
+            text: personalizedContent.replace(/<[^>]*>/g, ''),
+          }
+
+          const { error } = await resend.emails.send(emailData)
+
+          if (error) {
+            throw new Error(error.message)
+          }
+
+          sentCount++
+        } catch (error) {
+          failedCount++
+          logger.error(`Failed to send scheduled email to ${recipient.email}:`, error)
+        }
+      }
+
+      // Update status to completed
+      await doc.ref.update({
+        status: 'completed',
+        sentCount,
+        failedCount,
+        completedAt: admin.firestore.FieldValue.serverTimestamp(),
+      })
+
+      logger.info(`Scheduled email ${doc.id} completed: ${sentCount} sent, ${failedCount} failed`)
+    } catch (error) {
+      logger.error(`Error processing scheduled email ${doc.id}:`, error)
+      await doc.ref.update({
+        status: 'failed',
+        error: error.message,
+        failedAt: admin.firestore.FieldValue.serverTimestamp(),
+      })
+    }
+  }
+
+  logger.info(`Processed ${scheduledEmails.docs.length} scheduled emails`)
+})
